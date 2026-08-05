@@ -3166,83 +3166,83 @@ async function loadData(bg){
      routes to the next fallback step instead of silently overwriting good data. ── */
   const _isPlausible=(rows)=> !(_lastGoodRowCount>100 && rows.length < _lastGoodRowCount*0.7);
 
-  /* ── GAS fallback path — used only if Supabase (primary) fails. One retry before giving up. ── */
-  const _runGasFallback=(attempt)=>{
+  /* ── Supabase fallback path — used only if GAS (primary) fails. One retry before giving up. ── */
+  const _runSupabaseFallback=(attempt)=>{
     attempt = attempt || 1;
-    _logLoadEvent('info', (bg?'[auto-refresh] ':'[manual load] ')+'Falling back to GAS (attempt '+attempt+')');
+    _logLoadEvent('info', (bg?'[auto-refresh] ':'[manual load] ')+'Falling back to Supabase (attempt '+attempt+')');
     const fbWorker = makeWorker(GAS_URL, URL_BASE, API_KEY, TABLE, _wcols);
+    let _acc=[];
     const qcReadyPromise = buildQcReadySet();
     fbWorker.onmessage=async(e)=>{
       const d=e.data;
       if(d.t==='p'&&!bg) setProgress(d.v);
-      if(d.t==='e'){
-        fbWorker.terminate();
-        _logLoadEvent('warn', 'GAS fallback attempt '+attempt+' failed: '+(d.msg||'unknown'));
-        if(attempt<2){ setTimeout(()=>_runGasFallback(attempt+1), 1500); }
-        else { _err(new Error(d.msg||'GAS fallback also failed after retry')); }
-      }
-      if(d.t==='g'){
-        fbWorker.terminate();
-        const mm=new Map();
-        d.c.forEach(r=>mm.set(String(r.tracking_id||Math.random()),r));
-        d.h.forEach(r=>mm.set(String(r.tracking_id||Math.random()),r));
-        const merged=[...mm.values()];
-        if(!_isPlausible(merged)){
-          _logLoadEvent('warn', 'GAS fallback attempt '+attempt+' rejected as implausible: '+merged.length+' rows vs ~'+_lastGoodRowCount+' expected');
-          if(attempt<2){ setTimeout(()=>_runGasFallback(attempt+1), 1500); return; }
-          _err(new Error('GAS fallback returned '+merged.length.toLocaleString('en-IN')+' rows vs ~'+_lastGoodRowCount.toLocaleString('en-IN')+' expected — keeping last good data on screen'));
-          return;
-        }
-        await qcReadyPromise;
-        await _done(merged);
-      }
-    };
-    fbWorker.onerror=()=>{
-      fbWorker.terminate();
-      _logLoadEvent('warn', 'GAS fallback attempt '+attempt+' worker error');
-      if(attempt<2){ setTimeout(()=>_runGasFallback(attempt+1), 1500); }
-      else { _err(new Error('GAS fallback worker error after retry')); }
-    };
-    fbWorker.postMessage({t:'sg'});
-  };
-
-  /* ── Primary source: Supabase (real-time, direct). One retry, then falls back to GAS. ── */
-  const _runSupabasePrimary=(attempt)=>{
-    attempt = attempt || 1;
-    const pWorker = attempt===1 ? worker : makeWorker(GAS_URL, URL_BASE, API_KEY, TABLE, _wcols);
-    let _acc=[];
-    const qcReadyPromise = buildQcReadySet();
-    pWorker.onmessage=async(e)=>{
-      const d=e.data;
-      if(d.t==='p'&&!bg) setProgress(d.v);
       if(d.t==='b') _acc=_acc.concat(d.rows);
       if(d.t==='e'){
-        pWorker.terminate();
-        _logLoadEvent('warn', (bg?'[auto-refresh] ':'[manual load] ')+'Supabase primary attempt '+attempt+' failed: '+(d.msg||'unknown'));
-        if(attempt<2){ setTimeout(()=>_runSupabasePrimary(attempt+1), 1500); }
-        else { _runGasFallback(); }
+        fbWorker.terminate();
+        _logLoadEvent('warn', 'Supabase fallback attempt '+attempt+' failed: '+(d.msg||'unknown'));
+        if(attempt<2){ setTimeout(()=>_runSupabaseFallback(attempt+1), 1500); }
+        else { _err(new Error(d.msg||'Supabase fallback also failed after retry')); }
       }
       if(d.t==='d'){
-        pWorker.terminate();
+        fbWorker.terminate();
         if(!_isPlausible(_acc)){
-          _logLoadEvent('warn', 'Supabase primary attempt '+attempt+' rejected as implausible: '+_acc.length+' rows vs ~'+_lastGoodRowCount+' expected');
-          if(attempt<2){ setTimeout(()=>_runSupabasePrimary(attempt+1), 1500); return; }
-          _runGasFallback();
+          _logLoadEvent('warn', 'Supabase fallback attempt '+attempt+' rejected as implausible: '+_acc.length+' rows vs ~'+_lastGoodRowCount+' expected');
+          if(attempt<2){ setTimeout(()=>_runSupabaseFallback(attempt+1), 1500); return; }
+          _err(new Error('Supabase fallback returned '+_acc.length.toLocaleString('en-IN')+' rows vs ~'+_lastGoodRowCount.toLocaleString('en-IN')+' expected — keeping last good data on screen'));
           return;
         }
         await qcReadyPromise;
         await _done(_acc);
       }
     };
+    fbWorker.onerror=()=>{
+      fbWorker.terminate();
+      _logLoadEvent('warn', 'Supabase fallback attempt '+attempt+' worker error');
+      if(attempt<2){ setTimeout(()=>_runSupabaseFallback(attempt+1), 1500); }
+      else { _err(new Error('Supabase fallback worker error after retry')); }
+    };
+    fbWorker.postMessage({t:'ss'});
+  };
+
+  /* ── Primary source: GAS (Drive-JSON-cached, fast). One retry, then falls back to Supabase. ── */
+  const _runGasPrimary=(attempt)=>{
+    attempt = attempt || 1;
+    const pWorker = attempt===1 ? worker : makeWorker(GAS_URL, URL_BASE, API_KEY, TABLE, _wcols);
+    const qcReadyPromise = buildQcReadySet();
+    pWorker.onmessage=async(e)=>{
+      const d=e.data;
+      if(d.t==='p'&&!bg) setProgress(d.v);
+      if(d.t==='e'){
+        pWorker.terminate();
+        _logLoadEvent('warn', (bg?'[auto-refresh] ':'[manual load] ')+'GAS primary attempt '+attempt+' failed: '+(d.msg||'unknown'));
+        if(attempt<2){ setTimeout(()=>_runGasPrimary(attempt+1), 1500); }
+        else { _runSupabaseFallback(); }
+      }
+      if(d.t==='g'){
+        pWorker.terminate();
+        const mm=new Map();
+        d.c.forEach(r=>mm.set(String(r.tracking_id||Math.random()),r));
+        d.h.forEach(r=>mm.set(String(r.tracking_id||Math.random()),r));
+        const merged=[...mm.values()];
+        if(!_isPlausible(merged)){
+          _logLoadEvent('warn', 'GAS primary attempt '+attempt+' rejected as implausible: '+merged.length+' rows vs ~'+_lastGoodRowCount+' expected');
+          if(attempt<2){ setTimeout(()=>_runGasPrimary(attempt+1), 1500); return; }
+          _runSupabaseFallback();
+          return;
+        }
+        await qcReadyPromise;
+        await _done(merged);
+      }
+    };
     pWorker.onerror=()=>{
       pWorker.terminate();
-      _logLoadEvent('warn', (bg?'[auto-refresh] ':'[manual load] ')+'Supabase primary attempt '+attempt+' worker error');
-      if(attempt<2){ setTimeout(()=>_runSupabasePrimary(attempt+1), 1500); }
-      else { _runGasFallback(); }
+      _logLoadEvent('warn', (bg?'[auto-refresh] ':'[manual load] ')+'GAS primary attempt '+attempt+' worker error');
+      if(attempt<2){ setTimeout(()=>_runGasPrimary(attempt+1), 1500); }
+      else { _runSupabaseFallback(); }
     };
-    pWorker.postMessage({t:'ss'});
+    pWorker.postMessage({t:'sg'});
   };
-  _runSupabasePrimary();
+  _runGasPrimary();
 }
 
 /* ════════════════════════════════════
