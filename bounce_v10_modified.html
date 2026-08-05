@@ -1886,6 +1886,56 @@ body,header,.global-slicer,.chart-card,.panel.active,.tabs,
 @media (prefers-reduced-motion: reduce){
   *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   ✦ SMOOTHNESS / PERF LAYER — pure visual polish, zero logic changes.
+   Faster paint & snappier feedback on every clickable element.
+═══════════════════════════════════════════════════════════════════════ */
+
+html{ -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale; text-rendering:optimizeSpeed; scrollbar-gutter:stable; }
+
+button,.btn,.tab,.ctrl-btn,.preset-btn,select,.fc-ms-btn,.nav-menu-item,
+.macro-kpi-card,.leg,a[onclick],[onclick]{
+  transition:transform .12s cubic-bezier(.34,1.45,.64,1),
+             background-color .16s ease,
+             border-color .16s ease,
+             box-shadow .16s ease,
+             color .16s ease,
+             opacity .16s ease;
+}
+button:active,.btn:active,.tab:active,.ctrl-btn:active,.preset-btn:active,
+.fc-ms-btn:active,.nav-menu-item:active{
+  transform:scale(.965);
+  transition-duration:.08s;
+}
+
+.brand-icon,.tab,.btn,.ctrl-btn,.preset-btn,.macro-kpi-card,
+#loaderBar,.spinner,.ldot,#navMenuWrap,.nav-menu{
+  will-change:transform;
+  backface-visibility:hidden;
+}
+
+@keyframes panelIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.panel.active{ animation:panelIn .22s cubic-bezier(.4,0,.2,1); }
+
+.tabs{ contain:layout style; }
+.table-wrap{ contain:layout style; }
+.panel,.macro-kpi-card,#funnelContainer,.diag-box{ contain:layout style; }
+
+.btn:hover,.ctrl-btn:hover,.macro-kpi-card:hover{
+  transform:translateY(-1px);
+}
+
+::-webkit-scrollbar{ width:10px; height:10px; }
+::-webkit-scrollbar-track{ background:transparent; }
+::-webkit-scrollbar-thumb{ background:rgba(245,158,11,.28); border-radius:99px; border:2px solid transparent; background-clip:content-box; }
+::-webkit-scrollbar-thumb:hover{ background:rgba(245,158,11,.45); background-clip:content-box; }
+
+button:focus-visible,.btn:focus-visible,select:focus-visible,input:focus-visible,.tab:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+  transition:outline-offset .1s ease;
+}
 </style>
 </head>
 <body>
