@@ -2879,15 +2879,15 @@ async function buildQcReadySet() {
   try {
     // Fetch all pages from each source in parallel
     const fetchAll = async (path) => {
-      let rows = [], from = 0, ps = 1000;
+      let rows = [], from = 0, ps = 5000;
       while (true) {
         const r = await apiGet(`${path}&limit=${ps}&offset=${from}`);
         if (!r.ok) break;
         const batch = await r.json();
         if (!Array.isArray(batch) || batch.length === 0) break;
         rows = rows.concat(batch);
-        if (batch.length < ps) break;
-        from += ps;
+        from += batch.length; // advance by actual returned count — safe even if the
+                               // server caps responses below the requested `ps`
       }
       return rows;
     };
@@ -2913,7 +2913,7 @@ async function apiGet(path, hdrs={}){
   return fetch(`${URL_BASE}${path}`,{headers:{apikey:API_KEY,Authorization:`Bearer ${API_KEY}`,...hdrs}});
 }
 async function fetchPaged(filter, cols){
-  let rows=[], from=0, ps=1000;
+  let rows=[], from=0, ps=5000;
   // IMPORTANT: order= is required for stable PostgREST pagination.
   // Without it, rows between pages are non-deterministic and records get silently dropped.
   const orderParam = 'order=shipment_report_date.asc.nullslast,tracking_id.asc';
@@ -2929,8 +2929,11 @@ async function fetchPaged(filter, cols){
         :`HTTP ${r.status}: ${p?.message||b.slice(0,120)}`
       );
     }
-    const batch=await r.json(); rows=rows.concat(batch);
-    if(batch.length<ps) break; from+=ps;
+    const batch=await r.json();
+    if(!Array.isArray(batch) || batch.length===0) break;
+    rows=rows.concat(batch);
+    from+=batch.length; // advance by what actually came back, not the requested page size —
+                         // if Supabase caps responses below `ps`, this still paginates correctly
   }
   return rows;
 }
@@ -3005,7 +3008,7 @@ async function loadData(bg){
       'const SK='+JSON.stringify(sk)+';',
       'const TB='+JSON.stringify(tb)+';',
       'const CO='+JSON.stringify(co)+';',
-      'const PS=1000,PA=8;',
+      'const PS=5000,PA=20;',
       'async function sb(){',
       '  var url=SU+"/rest/v1/"+TB+"?order=shipment_report_date.asc.nullslast,tracking_id.asc&select="+CO;',
       '  var hd={apikey:SK,Authorization:"Bearer "+SK};',
@@ -3017,23 +3020,33 @@ async function loadData(bg){
       '  try{ b0=await r0.json(); }catch(pe){ self.postMessage({t:"e",msg:"Supabase payload corrupted"}); return; }',
       '  var cr=r0.headers.get("content-range")||"";',
       '  var tot=cr.includes("/")?parseInt(cr.split("/")[1]):b0.length;',
-      '  self.postMessage({t:"b",rows:b0,ld:b0.length,tot:tot});',
+      '  var ld=b0.length;',
+      '  self.postMessage({t:"b",rows:b0,ld:ld,tot:tot});',
       '  self.postMessage({t:"p",v:20});',
-      '  if(tot<=PS||b0.length<PS){self.postMessage({t:"d"});return;}',
-      '  var pg=Math.ceil(tot/PS),ld=b0.length;',
-      '  var rem=Array.from({length:pg-1},function(_,i){return i+1;});',
+      '  if(ld<=0 || ld>=tot){ self.postMessage({t:"d"}); return; }',
+      '  /* stepSize = rows the server ACTUALLY returned for one request — may be less',
+      '     than the PS we asked for if Supabase enforces its own max-rows cap. Every',
+      '     subsequent request re-uses that real size instead of assuming PS, so',
+      '     pagination stays correct (never silently truncates) no matter what the',
+      '     server honors. */',
+      '  var stepSize=ld, guard=0;',
       '  try{',
-      '    for(var i=0;i<rem.length;i+=PA){',
-      '      var bch=rem.slice(i,i+PA);',
-      '      var res=await Promise.all(bch.map(function(p){',
-      '        return fetch(url,{headers:Object.assign({},hd,{Range:(p*PS)+"-"+(p*PS+PS-1)})}).then(function(r){',
-      '          if(!r.ok) throw new Error("Supabase HTTP "+r.status+" on page "+p);',
+      '    while(ld<tot){',
+      '      guard++;',
+      '      if(guard>1000){ self.postMessage({t:"e",msg:"Pagination guard tripped ("+ld+" of "+tot+") — aborting"}); return; }',
+      '      var starts=[], cursor=ld;',
+      '      for(var k=0;k<PA && cursor<tot;k++){ starts.push(cursor); cursor+=stepSize; }',
+      '      var res=await Promise.all(starts.map(function(s){',
+      '        return fetch(url,{headers:Object.assign({},hd,{Range:s+"-"+(s+stepSize-1)})}).then(function(r){',
+      '          if(!r.ok) throw new Error("Supabase HTTP "+r.status+" at offset "+s);',
       '          return r.json();',
       '        });',
       '      }));',
-      '      var br=[].concat.apply([],res);ld+=br.length;',
+      '      var br=[].concat.apply([],res);',
+      '      if(br.length===0) break;',
+      '      ld+=br.length;',
       '      self.postMessage({t:"b",rows:br,ld:ld,tot:tot});',
-      '      self.postMessage({t:"p",v:20+Math.round(((i+bch.length)/rem.length)*72)});',
+      '      self.postMessage({t:"p",v:20+Math.round((ld/tot)*72)});',
       '    }',
       '  }catch(pe){ self.postMessage({t:"e",msg:pe.message||"Supabase pagination failed"}); return; }',
       '  if(ld<tot*0.98){ self.postMessage({t:"e",msg:"Supabase pagination incomplete: "+ld+" of "+tot}); return; }',
