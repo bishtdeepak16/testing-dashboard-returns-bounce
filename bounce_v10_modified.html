@@ -2973,15 +2973,20 @@ function finishProgress(cb){
     }
   }, 80);
 }
-async function loadData(){
-  setLoading('pendingTable','Loading QC Pending…');
-  setLoading('badTable','Loading BAD QC…');
-  setLoading('tatTable','Loading TAT…');
+let _isLoading=false;
+async function loadData(bg){
+  if(_isLoading){ console.warn('loadData already in progress — skipping overlapping call'); return; }
+  _isLoading=true;
+  if(!bg){
+    setLoading('pendingTable','Loading QC Pending…');
+    setLoading('badTable','Loading BAD QC…');
+    setLoading('tatTable','Loading TAT…');
+    setProgress(5);
+  }
   updateRefreshInfoBox('loading');
-  setProgress(5);
   const _lmsgs=['Connecting to data source…','Fetching returns data…','Processing records…','Building dashboard…'];
   let _lmi=0;
-  const _lmInt=setInterval(()=>{_lmi=(_lmi+1)%_lmsgs.length;const el=document.getElementById('loaderMsg');if(el)el.textContent=_lmsgs[_lmi];},2200);
+  const _lmInt = bg ? null : setInterval(()=>{_lmi=(_lmi+1)%_lmsgs.length;const el=document.getElementById('loaderMsg');if(el)el.textContent=_lmsgs[_lmi];},2200);
 
   /* ── Web Worker: runs in separate thread, NOT throttled when tab is hidden ── */
   function makeWorker(gu,su,sk,tb,co){
@@ -2992,23 +2997,15 @@ async function loadData(){
       'const TB='+JSON.stringify(tb)+';',
       'const CO='+JSON.stringify(co)+';',
       'const PS=1000,PA=8;',
-      'async function gas(){',
-      '  self.postMessage({t:"p",v:15});',
-      '  var rs=await Promise.all([fetch(GU+"?type=cold"),fetch(GU+"?type=hot")]);',
-      '  self.postMessage({t:"p",v:60});',
-      '  if(!rs[0].ok && !rs[1].ok){ self.postMessage({t:"e",msg:"GAS fetch failed"}); return; }',
-      '  var cold=rs[0].ok?await rs[0].json():[];',
-      '  self.postMessage({t:"p",v:75});',
-      '  var hot=rs[1].ok?await rs[1].json():[];',
-      '  self.postMessage({t:"p",v:88});',
-      '  if(cold.length===0 && hot.length===0){ self.postMessage({t:"e",msg:"GAS returned no data"}); return; }',
-      '  self.postMessage({t:"g",c:cold,h:hot});',
-      '}',
       'async function sb(){',
       '  var url=SU+"/rest/v1/"+TB+"?order=shipment_report_date.asc.nullslast,tracking_id.asc&select="+CO;',
       '  var hd={apikey:SK,Authorization:"Bearer "+SK};',
-      '  var r0=await fetch(url,{headers:Object.assign({},hd,{Range:"0-"+(PS-1),Prefer:"count=exact"})});',
-      '  var b0=await r0.json();',
+      '  var r0;',
+      '  try{ r0=await fetch(url,{headers:Object.assign({},hd,{Range:"0-"+(PS-1),Prefer:"count=exact"})}); }',
+      '  catch(fe){ self.postMessage({t:"e",msg:"Supabase network fetch failed: "+fe.message}); return; }',
+      '  if(!r0.ok){ self.postMessage({t:"e",msg:"Supabase HTTP "+r0.status}); return; }',
+      '  var b0;',
+      '  try{ b0=await r0.json(); }catch(pe){ self.postMessage({t:"e",msg:"Supabase payload corrupted"}); return; }',
       '  var cr=r0.headers.get("content-range")||"";',
       '  var tot=cr.includes("/")?parseInt(cr.split("/")[1]):b0.length;',
       '  self.postMessage({t:"b",rows:b0,ld:b0.length,tot:tot});',
@@ -3016,96 +3013,158 @@ async function loadData(){
       '  if(tot<=PS||b0.length<PS){self.postMessage({t:"d"});return;}',
       '  var pg=Math.ceil(tot/PS),ld=b0.length;',
       '  var rem=Array.from({length:pg-1},function(_,i){return i+1;});',
-      '  for(var i=0;i<rem.length;i+=PA){',
-      '    var bch=rem.slice(i,i+PA);',
-      '    var res=await Promise.all(bch.map(function(p){',
-      '      return fetch(url,{headers:Object.assign({},hd,{Range:(p*PS)+"-"+(p*PS+PS-1)})}).then(function(r){return r.json();});',
-      '    }));',
-      '    var br=[].concat.apply([],res);ld+=br.length;',
-      '    self.postMessage({t:"b",rows:br,ld:ld,tot:tot});',
-      '    self.postMessage({t:"p",v:20+Math.round(((i+bch.length)/rem.length)*72)});',
-      '  }',
+      '  try{',
+      '    for(var i=0;i<rem.length;i+=PA){',
+      '      var bch=rem.slice(i,i+PA);',
+      '      var res=await Promise.all(bch.map(function(p){',
+      '        return fetch(url,{headers:Object.assign({},hd,{Range:(p*PS)+"-"+(p*PS+PS-1)})}).then(function(r){',
+      '          if(!r.ok) throw new Error("Supabase HTTP "+r.status+" on page "+p);',
+      '          return r.json();',
+      '        });',
+      '      }));',
+      '      var br=[].concat.apply([],res);ld+=br.length;',
+      '      self.postMessage({t:"b",rows:br,ld:ld,tot:tot});',
+      '      self.postMessage({t:"p",v:20+Math.round(((i+bch.length)/rem.length)*72)});',
+      '    }',
+      '  }catch(pe){ self.postMessage({t:"e",msg:pe.message||"Supabase pagination failed"}); return; }',
+      '  if(ld<tot*0.98){ self.postMessage({t:"e",msg:"Supabase pagination incomplete: "+ld+" of "+tot}); return; }',
       '  self.postMessage({t:"d"});',
+      '}',
+      'async function gas(){',
+      '  var rs;',
+      '  try{ rs=await Promise.all([fetch(GU+"?type=cold"),fetch(GU+"?type=hot")]); }',
+      '  catch(fe){ self.postMessage({t:"e",msg:"GAS network fetch failed: "+fe.message}); return; }',
+      '  self.postMessage({t:"p",v:55});',
+      '  if(!rs[0].ok && !rs[1].ok){ self.postMessage({t:"e",msg:"GAS fetch failed"}); return; }',
+      '  var cold=[],hot=[];',
+      '  try{ cold=rs[0].ok?await rs[0].json():[]; }catch(pe){ self.postMessage({t:"e",msg:"GAS cold payload corrupted/truncated"}); return; }',
+      '  self.postMessage({t:"p",v:75});',
+      '  try{ hot=rs[1].ok?await rs[1].json():[]; }catch(pe){ self.postMessage({t:"e",msg:"GAS hot payload corrupted/truncated"}); return; }',
+      '  self.postMessage({t:"p",v:88});',
+      '  if(cold.length===0 && hot.length===0){ self.postMessage({t:"e",msg:"GAS returned no data"}); return; }',
+      '  self.postMessage({t:"g",c:cold,h:hot});',
       '}',
       'self.onmessage=function(e){if(e.data.t==="sg")gas();if(e.data.t==="ss")sb();};'
     ];
     return new Worker(URL.createObjectURL(new Blob([ln.join("\n")],{type:"application/javascript"})));
   }
 
-  const worker = makeWorker(GAS_URL, URL_BASE, API_KEY, TABLE, 'tracking_id,fc_code,fc_name,client_name,marketplace_name,shipment_report_date,shipment_received_date,qc_status,qc_completed_at,ticket_id,claim_status,reimbursement_amount,return_type,logistics_partner,order_id,damage_summary');
+  const _wcols='tracking_id,fc_code,fc_name,client_name,marketplace_name,shipment_report_date,shipment_received_date,qc_status,qc_completed_at,ticket_id,claim_status,reimbursement_amount,return_type,logistics_partner,order_id,damage_summary';
+  const worker = makeWorker(GAS_URL, URL_BASE, API_KEY, TABLE, _wcols);
+
+  const _cleanup=()=>{ _isLoading=false; if(_lmInt) clearInterval(_lmInt); };
 
   const _done=async(rows)=>{
     try{
-      allRows=rows; setProgress(92);
-      applyAuthFilter(); populateFilters(); refreshAll(); setProgress(100);
+      allRows=rows; if(!bg) setProgress(92);
+      applyAuthFilter(); populateFilters(); refreshAll(); if(!bg) setProgress(100);
       updateRefreshInfoBox('done');
       if(document.getElementById('page-macro')?.style.display!=='none') setTimeout(renderMacro,80);
-      clearInterval(_lmInt);
-      finishProgress(()=>{
-        const ldr=document.getElementById('bounceLoader');
-        if(ldr){ldr.style.opacity='0';setTimeout(()=>{ldr.style.display='none';showOnboardingHints();},650);}
-      });
+      _cleanup();
+      if(!bg){
+        finishProgress(()=>{
+          const ldr=document.getElementById('bounceLoader');
+          if(ldr){ldr.style.opacity='0';setTimeout(()=>{ldr.style.display='none';showOnboardingHints();},650);}
+        });
+      }
       const ts=new Date().toLocaleString('en-IN',{dateStyle:'medium',timeStyle:'short'});
       const el_ts=document.getElementById('tsBadge');if(el_ts)el_ts.textContent=ts;
-      document.getElementById('footerTs').textContent='Data as of: '+ts+' · '+allRows.length.toLocaleString('en-IN')+' total rows';
+      const footerTsEl=document.getElementById('footerTs');
+      if(footerTsEl) footerTsEl.textContent='Data as of: '+ts+' · '+allRows.length.toLocaleString('en-IN')+' total rows';
     }catch(err){_err(err);}
   };
   const _err=(e)=>{
-    worker.terminate(); clearInterval(_lmInt); clearInterval(_prgTick);
-    const l2=document.getElementById('bounceLoader');
-    if(l2){l2.style.opacity='0';setTimeout(()=>l2.style.display='none',650);}
-    setError('pendingTable',e.message||'Error');
-    setError('badTable',e.message||'Error');
-    document.getElementById('funnelContainer').innerHTML='<div class="state-msg"><span style="font-size:1.5rem">⚠️</span><span style="color:var(--red)">'+(e.message||'Error')+'</span></div>';
+    worker.terminate(); _cleanup();
+    if(!bg){
+      clearInterval(_prgTick);
+      const l2=document.getElementById('bounceLoader');
+      if(l2){l2.style.opacity='0';setTimeout(()=>l2.style.display='none',650);}
+      setError('pendingTable',e.message||'Error');
+      setError('badTable',e.message||'Error');
+      const fc=document.getElementById('funnelContainer');
+      if(fc) fc.innerHTML='<div class="state-msg"><span style="font-size:1.5rem">⚠️</span><span style="color:var(--red)">'+(e.message||'Error')+'</span></div>';
+    } else {
+      console.warn('Background auto-refresh failed (dashboard keeps showing last good data):', e.message||e);
+    }
     updateRefreshInfoBox('error');
   };
 
-  /* ── Supabase fallback path (used if GAS primary source fails or errors) ── */
-  const _runSupabaseFallback=()=>{
-    const fbWorker = makeWorker(GAS_URL, URL_BASE, API_KEY, TABLE, 'tracking_id,fc_code,fc_name,client_name,marketplace_name,shipment_report_date,shipment_received_date,qc_status,qc_completed_at,ticket_id,claim_status,reimbursement_amount,return_type,logistics_partner,order_id,damage_summary');
-    let _acc=[];
-    buildQcReadySet();
+  /* ── GAS fallback path — used only if Supabase (primary) fails ── */
+  const _runGasFallback=()=>{
+    const fbWorker = makeWorker(GAS_URL, URL_BASE, API_KEY, TABLE, _wcols);
+    const qcReadyPromise = buildQcReadySet();
     fbWorker.onmessage=async(e)=>{
       const d=e.data;
-      if(d.t==='p') setProgress(d.v);
-      if(d.t==='b') _acc=_acc.concat(d.rows);
-      if(d.t==='d'){fbWorker.terminate();await _done(_acc);}
-    };
-    fbWorker.onerror=(e)=>_err(new Error(e.message||'Worker error'));
-    fbWorker.postMessage({t:'ss'});
-  };
-
-  /* ── Primary source: GAS hot/cold. Falls back to Supabase on failure. ── */
-  if(GAS_URL&&GAS_URL!=='YOUR_GAS_WEB_APP_URL_HERE'){
-    worker.onmessage=async(e)=>{
-      const d=e.data;
-      if(d.t==='p') setProgress(d.v);
-      if(d.t==='e'){ worker.terminate(); _runSupabaseFallback(); }
+      if(d.t==='p'&&!bg) setProgress(d.v);
+      if(d.t==='e'){ fbWorker.terminate(); _err(new Error(d.msg||'GAS fallback also failed')); }
       if(d.t==='g'){
-        worker.terminate();
+        fbWorker.terminate();
         const mm=new Map();
         d.c.forEach(r=>mm.set(String(r.tracking_id||Math.random()),r));
         d.h.forEach(r=>mm.set(String(r.tracking_id||Math.random()),r));
-        await buildQcReadySet();
+        await qcReadyPromise;
         await _done([...mm.values()]);
       }
     };
-    worker.onerror=()=>{ _runSupabaseFallback(); };
-    worker.postMessage({t:'sg'});
-  }else{
-    _runSupabaseFallback();
-  }
+    fbWorker.onerror=()=>_err(new Error('GAS fallback worker error'));
+    fbWorker.postMessage({t:'sg'});
+  };
+
+  /* ── Primary source: Supabase (real-time, direct). Falls back to GAS on failure. ── */
+  let _acc=[];
+  const qcReadyPromise = buildQcReadySet();
+  worker.onmessage=async(e)=>{
+    const d=e.data;
+    if(d.t==='p'&&!bg) setProgress(d.v);
+    if(d.t==='b') _acc=_acc.concat(d.rows);
+    if(d.t==='e'){ worker.terminate(); _runGasFallback(); }
+    if(d.t==='d'){
+      worker.terminate();
+      await qcReadyPromise;
+      await _done(_acc);
+    }
+  };
+  worker.onerror=()=>{ worker.terminate(); _runGasFallback(); };
+  worker.postMessage({t:'ss'});
+}
+
+/* ════════════════════════════════════
+   AUTO-REFRESH — hourly, 9:00 AM – 9:59 PM local time only.
+   Aligns to the top of the hour, then repeats every 60 min.
+   Silent/background: no full-screen loader, keeps last good
+   data visible on screen if a refresh attempt fails.
+════════════════════════════════════ */
+let _autoRefreshAlignTimer=null, _autoRefreshHourlyTimer=null;
+function isWithinAutoRefreshWindow(d){
+  const h=(d||new Date()).getHours();
+  return h>=9 && h<22; // 09:00–21:59
+}
+function autoRefreshTick(){
+  if(isWithinAutoRefreshWindow()) loadData(true);
+}
+function scheduleAutoRefresh(){
+  if(_autoRefreshAlignTimer) clearTimeout(_autoRefreshAlignTimer);
+  if(_autoRefreshHourlyTimer) clearInterval(_autoRefreshHourlyTimer);
+  const now=new Date();
+  const msToNextHour = ((60-now.getMinutes())*60 - now.getSeconds())*1000 - now.getMilliseconds();
+  _autoRefreshAlignTimer=setTimeout(()=>{
+    autoRefreshTick();
+    _autoRefreshHourlyTimer=setInterval(autoRefreshTick, 3600000);
+  }, Math.max(1000,msToNextHour));
 }
 
 /* ─── Info box helpers ─── */
+function _fmt12h(h){
+  const period = h<12 ? 'AM' : 'PM';
+  let h12 = h % 12; if(h12===0) h12=12;
+  return `${h12}:00 ${period}`;
+}
 function getNextRefreshText() {
   const now = new Date();
   const h = now.getHours();
-  let nextHour, label;
-  if (h < 9)       { nextHour = 9;  label = 'morning'; }
-  else if (h < 18) { nextHour = 18; label = 'evening'; }
-  else             { nextHour = 9;  label = 'tomorrow 9 AM'; return `Next: ${label}`; }
-  return `Next: ${nextHour}:00 ${label === 'morning' ? 'AM' : 'PM'}`;
+  if (h < 9) return `Next: ${_fmt12h(9)}`;
+  if (h < 21) return `Next: ${_fmt12h(h+1)}`; // hourly refresh, window ends 9:59 PM
+  return 'Next: tomorrow 9:00 AM';
 }
 function updateRefreshInfoBox(state) {
   const last = document.getElementById('lastRefreshLine');
@@ -4649,6 +4708,7 @@ function exportAtRiskExcel(){
 }
 
 loadData();
+scheduleAutoRefresh();
 
 /* ════════════════════════════════════
    NAV MENU & PAGE SWITCHING
