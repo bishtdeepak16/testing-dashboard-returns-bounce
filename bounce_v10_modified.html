@@ -2637,6 +2637,15 @@ const isColdRow = r =>
    STATE
 ════════════════════════════════════ */
 let allRows       = [];
+let _lastGoodRowCount = 0;
+window._bounceLoadLog = []; // recent load attempts/failures for diagnostics — visible in console & Diagnose panel
+function _logLoadEvent(kind, msg){
+  const entry = {t:new Date().toLocaleString('en-IN',{dateStyle:'medium',timeStyle:'medium'}), kind, msg};
+  window._bounceLoadLog.unshift(entry);
+  window._bounceLoadLog = window._bounceLoadLog.slice(0,20); // keep last 20
+  if(kind==='error') console.error('[BOUNCE load]', entry.t, msg);
+  else console.info('[BOUNCE load]', entry.t, msg);
+}
 let qcReadySet    = new Set(); // tracking IDs with qc_ready_tag = 'Y'
 let dateFrom      = null;
 let dateTo        = null;
@@ -3035,12 +3044,13 @@ async function loadData(bg){
       '  try{ rs=await Promise.all([fetch(GU+"?type=cold"),fetch(GU+"?type=hot")]); }',
       '  catch(fe){ self.postMessage({t:"e",msg:"GAS network fetch failed: "+fe.message}); return; }',
       '  self.postMessage({t:"p",v:55});',
-      '  if(!rs[0].ok && !rs[1].ok){ self.postMessage({t:"e",msg:"GAS fetch failed"}); return; }',
-      '  var cold=[],hot=[];',
-      '  try{ cold=rs[0].ok?await rs[0].json():[]; }catch(pe){ self.postMessage({t:"e",msg:"GAS cold payload corrupted/truncated"}); return; }',
+      '  if(!rs[0].ok || !rs[1].ok){ self.postMessage({t:"e",msg:"GAS fetch failed (cold ok="+rs[0].ok+", hot ok="+rs[1].ok+")"}); return; }',
+      '  var cold,hot;',
+      '  try{ cold=await rs[0].json(); }catch(pe){ self.postMessage({t:"e",msg:"GAS cold payload corrupted/truncated"}); return; }',
       '  self.postMessage({t:"p",v:75});',
-      '  try{ hot=rs[1].ok?await rs[1].json():[]; }catch(pe){ self.postMessage({t:"e",msg:"GAS hot payload corrupted/truncated"}); return; }',
+      '  try{ hot=await rs[1].json(); }catch(pe){ self.postMessage({t:"e",msg:"GAS hot payload corrupted/truncated"}); return; }',
       '  self.postMessage({t:"p",v:88});',
+      '  if(!Array.isArray(cold) || !Array.isArray(hot)){ self.postMessage({t:"e",msg:"GAS returned non-array payload"}); return; }',
       '  if(cold.length===0 && hot.length===0){ self.postMessage({t:"e",msg:"GAS returned no data"}); return; }',
       '  self.postMessage({t:"g",c:cold,h:hot});',
       '}',
@@ -3056,7 +3066,7 @@ async function loadData(bg){
 
   const _done=async(rows)=>{
     try{
-      allRows=rows; if(!bg) setProgress(92);
+      allRows=rows; _lastGoodRowCount=rows.length; if(!bg) setProgress(92);
       applyAuthFilter(); populateFilters(); refreshAll(); if(!bg) setProgress(100);
       updateRefreshInfoBox('done');
       if(document.getElementById('page-macro')?.style.display!=='none') setTimeout(renderMacro,80);
@@ -3071,10 +3081,12 @@ async function loadData(bg){
       const el_ts=document.getElementById('tsBadge');if(el_ts)el_ts.textContent=ts;
       const footerTsEl=document.getElementById('footerTs');
       if(footerTsEl) footerTsEl.textContent='Data as of: '+ts+' · '+allRows.length.toLocaleString('en-IN')+' total rows';
+      _logLoadEvent('success', (bg?'[auto-refresh] ':'[manual load] ')+'Loaded '+rows.length.toLocaleString('en-IN')+' rows');
     }catch(err){_err(err);}
   };
   const _err=(e)=>{
     worker.terminate(); _cleanup();
+    _logLoadEvent('error', (bg?'[auto-refresh] ':'[manual load] ')+(e.message||'Unknown error'));
     if(!bg){
       clearInterval(_prgTick);
       const l2=document.getElementById('bounceLoader');
@@ -3083,49 +3095,91 @@ async function loadData(bg){
       setError('badTable',e.message||'Error');
       const fc=document.getElementById('funnelContainer');
       if(fc) fc.innerHTML='<div class="state-msg"><span style="font-size:1.5rem">⚠️</span><span style="color:var(--red)">'+(e.message||'Error')+'</span></div>';
-    } else {
-      console.warn('Background auto-refresh failed (dashboard keeps showing last good data):', e.message||e);
     }
     updateRefreshInfoBox('error');
   };
 
-  /* ── GAS fallback path — used only if Supabase (primary) fails ── */
-  const _runGasFallback=()=>{
+  /* ── Plausibility gate: rejects an implausibly small "successful" load so it
+     routes to the next fallback step instead of silently overwriting good data. ── */
+  const _isPlausible=(rows)=> !(_lastGoodRowCount>100 && rows.length < _lastGoodRowCount*0.7);
+
+  /* ── GAS fallback path — used only if Supabase (primary) fails. One retry before giving up. ── */
+  const _runGasFallback=(attempt)=>{
+    attempt = attempt || 1;
+    _logLoadEvent('info', (bg?'[auto-refresh] ':'[manual load] ')+'Falling back to GAS (attempt '+attempt+')');
     const fbWorker = makeWorker(GAS_URL, URL_BASE, API_KEY, TABLE, _wcols);
     const qcReadyPromise = buildQcReadySet();
     fbWorker.onmessage=async(e)=>{
       const d=e.data;
       if(d.t==='p'&&!bg) setProgress(d.v);
-      if(d.t==='e'){ fbWorker.terminate(); _err(new Error(d.msg||'GAS fallback also failed')); }
+      if(d.t==='e'){
+        fbWorker.terminate();
+        _logLoadEvent('warn', 'GAS fallback attempt '+attempt+' failed: '+(d.msg||'unknown'));
+        if(attempt<2){ setTimeout(()=>_runGasFallback(attempt+1), 1500); }
+        else { _err(new Error(d.msg||'GAS fallback also failed after retry')); }
+      }
       if(d.t==='g'){
         fbWorker.terminate();
         const mm=new Map();
         d.c.forEach(r=>mm.set(String(r.tracking_id||Math.random()),r));
         d.h.forEach(r=>mm.set(String(r.tracking_id||Math.random()),r));
+        const merged=[...mm.values()];
+        if(!_isPlausible(merged)){
+          _logLoadEvent('warn', 'GAS fallback attempt '+attempt+' rejected as implausible: '+merged.length+' rows vs ~'+_lastGoodRowCount+' expected');
+          if(attempt<2){ setTimeout(()=>_runGasFallback(attempt+1), 1500); return; }
+          _err(new Error('GAS fallback returned '+merged.length.toLocaleString('en-IN')+' rows vs ~'+_lastGoodRowCount.toLocaleString('en-IN')+' expected — keeping last good data on screen'));
+          return;
+        }
         await qcReadyPromise;
-        await _done([...mm.values()]);
+        await _done(merged);
       }
     };
-    fbWorker.onerror=()=>_err(new Error('GAS fallback worker error'));
+    fbWorker.onerror=()=>{
+      fbWorker.terminate();
+      _logLoadEvent('warn', 'GAS fallback attempt '+attempt+' worker error');
+      if(attempt<2){ setTimeout(()=>_runGasFallback(attempt+1), 1500); }
+      else { _err(new Error('GAS fallback worker error after retry')); }
+    };
     fbWorker.postMessage({t:'sg'});
   };
 
-  /* ── Primary source: Supabase (real-time, direct). Falls back to GAS on failure. ── */
-  let _acc=[];
-  const qcReadyPromise = buildQcReadySet();
-  worker.onmessage=async(e)=>{
-    const d=e.data;
-    if(d.t==='p'&&!bg) setProgress(d.v);
-    if(d.t==='b') _acc=_acc.concat(d.rows);
-    if(d.t==='e'){ worker.terminate(); _runGasFallback(); }
-    if(d.t==='d'){
-      worker.terminate();
-      await qcReadyPromise;
-      await _done(_acc);
-    }
+  /* ── Primary source: Supabase (real-time, direct). One retry, then falls back to GAS. ── */
+  const _runSupabasePrimary=(attempt)=>{
+    attempt = attempt || 1;
+    const pWorker = attempt===1 ? worker : makeWorker(GAS_URL, URL_BASE, API_KEY, TABLE, _wcols);
+    let _acc=[];
+    const qcReadyPromise = buildQcReadySet();
+    pWorker.onmessage=async(e)=>{
+      const d=e.data;
+      if(d.t==='p'&&!bg) setProgress(d.v);
+      if(d.t==='b') _acc=_acc.concat(d.rows);
+      if(d.t==='e'){
+        pWorker.terminate();
+        _logLoadEvent('warn', (bg?'[auto-refresh] ':'[manual load] ')+'Supabase primary attempt '+attempt+' failed: '+(d.msg||'unknown'));
+        if(attempt<2){ setTimeout(()=>_runSupabasePrimary(attempt+1), 1500); }
+        else { _runGasFallback(); }
+      }
+      if(d.t==='d'){
+        pWorker.terminate();
+        if(!_isPlausible(_acc)){
+          _logLoadEvent('warn', 'Supabase primary attempt '+attempt+' rejected as implausible: '+_acc.length+' rows vs ~'+_lastGoodRowCount+' expected');
+          if(attempt<2){ setTimeout(()=>_runSupabasePrimary(attempt+1), 1500); return; }
+          _runGasFallback();
+          return;
+        }
+        await qcReadyPromise;
+        await _done(_acc);
+      }
+    };
+    pWorker.onerror=()=>{
+      pWorker.terminate();
+      _logLoadEvent('warn', (bg?'[auto-refresh] ':'[manual load] ')+'Supabase primary attempt '+attempt+' worker error');
+      if(attempt<2){ setTimeout(()=>_runSupabasePrimary(attempt+1), 1500); }
+      else { _runGasFallback(); }
+    };
+    pWorker.postMessage({t:'ss'});
   };
-  worker.onerror=()=>{ worker.terminate(); _runGasFallback(); };
-  worker.postMessage({t:'ss'});
+  _runSupabasePrimary();
 }
 
 /* ════════════════════════════════════
@@ -3140,7 +3194,11 @@ function isWithinAutoRefreshWindow(d){
   return h>=9 && h<22; // 09:00–21:59
 }
 function autoRefreshTick(){
-  if(isWithinAutoRefreshWindow()) loadData(true);
+  if(!isWithinAutoRefreshWindow()) return;
+  // Random jitter so every open tab/browser doesn't hit Supabase in the same
+  // instant at the top of the hour — spreads load across a ~2 min window.
+  const jitterMs = Math.floor(Math.random()*120000);
+  setTimeout(()=>{ if(isWithinAutoRefreshWindow()) loadData(true); }, jitterMs);
 }
 function scheduleAutoRefresh(){
   if(_autoRefreshAlignTimer) clearTimeout(_autoRefreshAlignTimer);
@@ -3944,6 +4002,19 @@ async function runDiag(){
   c.innerHTML=h;
   h+=ds('3','PENDING count');
   try{const r=await apiGet(`/rest/v1/${TABLE}?qc_status=eq.PENDING&limit=1`,{Prefer:'count=exact',Range:'0-0'});const cr=r.headers.get('content-range')||'?';h+=(r.ok||r.status===206)?dr('ok',`✓ Range: ${cr}`):dr('err',`HTTP ${r.status}`);h+=`<div class="ok-banner">✅ All OK! Click Refresh.</div>`;}catch(e){h+=dr('err',e.message);}
+  c.innerHTML=h;
+  h+=ds('4','Recent load/refresh history');
+  const log = window._bounceLoadLog||[];
+  if(!log.length){
+    h+=dr('ok','No load events recorded yet this session.');
+  } else {
+    const rows = log.map(ev=>{
+      const cls = ev.kind==='error' ? 'err' : ev.kind==='warn' ? 'warn' : ev.kind==='success' ? 'ok' : 'ok';
+      const icon = ev.kind==='error' ? '✗' : ev.kind==='warn' ? '⚠' : ev.kind==='success' ? '✓' : 'ℹ';
+      return `<div class="diag-result ${cls}" style="margin-bottom:2px">${icon} <span style="color:var(--text3)">${ev.t}</span> — ${ev.msg}</div>`;
+    }).join('');
+    h+=`<div class="diag-step"><div class="diag-label">Test 4 — Recent load/refresh history (last ${log.length})</div>${rows}</div>`;
+  }
   c.innerHTML=h;
 }
 function ds(n,t){return `<div class="diag-step"><div class="diag-label">Test ${n} — ${t}</div>`;}
