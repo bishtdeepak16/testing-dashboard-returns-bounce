@@ -2929,7 +2929,7 @@ async function buildQcReadySet() {
   try {
     // Fetch all pages from each source in parallel
     const fetchAll = async (path) => {
-      let rows = [], from = 0, ps = 5000;
+      let rows = [], from = 0, ps = 2000;
       while (true) {
         const r = await apiGet(`${path}&limit=${ps}&offset=${from}`);
         if (!r.ok) break;
@@ -2963,7 +2963,7 @@ async function apiGet(path, hdrs={}){
   return fetch(`${URL_BASE}${path}`,{headers:{apikey:API_KEY,Authorization:`Bearer ${API_KEY}`,...hdrs}});
 }
 async function fetchPaged(filter, cols){
-  let rows=[], from=0, ps=5000;
+  let rows=[], from=0, ps=2000;
   // IMPORTANT: order= is required for stable PostgREST pagination.
   // Without it, rows between pages are non-deterministic and records get silently dropped.
   const orderParam = 'order=shipment_report_date.asc.nullslast,tracking_id.asc';
@@ -3058,7 +3058,7 @@ async function loadData(bg){
       'const SK='+JSON.stringify(sk)+';',
       'const TB='+JSON.stringify(tb)+';',
       'const CO='+JSON.stringify(co)+';',
-      'const PS=5000,PA=20;',
+      'const PS=2000,PA=10;',
       'async function sb(){',
       '  var url=SU+"/rest/v1/"+TB+"?order=shipment_report_date.asc.nullslast,tracking_id.asc&select="+CO;',
       '  var hd={apikey:SK,Authorization:"Bearer "+SK};',
