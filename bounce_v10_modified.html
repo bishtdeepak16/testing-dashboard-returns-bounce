@@ -3470,14 +3470,15 @@ function renderLineChart(){
   const rows=getLineRows();
   // Group by DATE only — strip any timestamp portion
   const byDate={};
-  // Remap faulty Dec 2026 entries → Dec 2025 if we're not actually in Dec 2026 yet
-    const _nowStr = new Date().toISOString().split('T')[0];
-    const _inDec2026 = _nowStr >= '2026-12-01';
+
   rows.forEach(r=>{
     if(!r.shipment_report_date) return;
     let d=String(r.shipment_report_date).split('T')[0];
-    if(d < '2026-01-01') return; // skip pre-2026 and garbage years (e.g. '20206-...')
+    // Remap faulty Dec 2026 entries → Dec 2025 (data entry errors logged before actual Dec)
+    const _nowStr = new Date().toISOString().split('T')[0];
+    const _inDec2026 = _nowStr >= '2026-12-01';
     if(d.startsWith('2026-12') && !_inDec2026) d=d.replace('2026-12','2025-12');
+    if(d < '2026-01-01') return; // skip pre-2026 AND remapped Dec entries from chart
     byDate[d]=(byDate[d]||0)+1;
   });
   const sorted=Object.entries(byDate).sort((a,b)=>a[0]<b[0]?-1:1);
@@ -4150,14 +4151,15 @@ const _origRenderLineChart = renderLineChart;
 function renderLineChart(){
   const rows=getLineRows();
   const byDate={};
-  // Remap faulty Dec 2026 entries → Dec 2025 if we're not actually in Dec 2026 yet
-    const _nowStr = new Date().toISOString().split('T')[0];
-    const _inDec2026 = _nowStr >= '2026-12-01';
+
   rows.forEach(r=>{
     if(!r.shipment_report_date) return;
     let d=String(r.shipment_report_date).split('T')[0];
-    if(d < '2026-01-01') return; // skip pre-2026 and garbage years (e.g. '20206-...')
+    // Remap faulty Dec 2026 entries → Dec 2025 (data entry errors logged before actual Dec)
+    const _nowStr = new Date().toISOString().split('T')[0];
+    const _inDec2026 = _nowStr >= '2026-12-01';
     if(d.startsWith('2026-12') && !_inDec2026) d=d.replace('2026-12','2025-12');
+    if(d < '2026-01-01') return; // skip pre-2026 AND remapped Dec entries from chart
     byDate[d]=(byDate[d]||0)+1;
   });
   const sorted=Object.entries(byDate).sort((a,b)=>a[0]<b[0]?-1:1);
@@ -5106,7 +5108,7 @@ function renderMacro(){
   rows.forEach(r=>{
     const mk = getMonthKey(r.shipment_report_date);
     if(!mk) return;
-    if(mk==='2026-12') return; // exclude faulty Dec 2026 records
+
     byMonth[mk] = (byMonth[mk]||0)+1;
   });
   const allMonths    = Object.keys(byMonth).sort();
@@ -5195,7 +5197,7 @@ function renderMacroRecoveryChart(rows){
   rows.filter(r=>r.claim_status==='Approved'&&r.shipment_report_date).forEach(r=>{
     const mk=getMonthKey(r.shipment_report_date);
     if(!mk) return;
-    if(mk==='2026-12') return; // exclude faulty Dec 2026 records
+
     byMonth[mk]=(byMonth[mk]||0)+(parseFloat(r.reimbursement_amount)||0);
   });
   const sorted=Object.entries(byMonth).sort((a,b)=>a[0]<b[0]?-1:1);
@@ -5224,7 +5226,7 @@ function renderMacroBadQcChart(rows){
   rows.filter(r=>r.qc_completed_at&&r.qc_completed_at.toString().trim()!=='').forEach(r=>{
     const mk=getMonthKey(r.qc_completed_at);
     if(!mk) return;
-    if(mk==='2026-12') return; // exclude faulty Dec 2026 records
+
     if(!byMonth[mk]) byMonth[mk]={bad:0,total:0};
     byMonth[mk].total++;
     if(r.qc_status==='BAD') byMonth[mk].bad++;
@@ -5531,7 +5533,7 @@ function renderMacroTATTrend(rows){
   rows.filter(r=>r.qc_completed_at&&r.shipment_report_date&&calcTat(r)!==null).forEach(r=>{
     const mk=getMonthKey(r.qc_completed_at||r.shipment_report_date);
     if(!mk) return;
-    if(mk==='2026-12') return; // exclude faulty Dec 2026 records
+
     if(!byMonth[mk]) byMonth[mk]={sum:0,count:0};
     byMonth[mk].sum   += calcTat(r);
     byMonth[mk].count += 1;
