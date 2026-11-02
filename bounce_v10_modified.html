@@ -2106,7 +2106,7 @@ button:focus-visible,.btn:focus-visible,select:focus-visible,input:focus-visible
     <div class="chart-title-left">
       <div>
         <div class="chart-title">📈 Returns Over Time</div>
-        <div class="chart-subtitle">Daily inbound returns · Data from Jan 7 onwards · Hover for exact count</div>
+        <div class="chart-subtitle">Daily inbound returns · Data from Jan 2026 onwards · Hover for exact count</div>
       </div>
       <div class="kpi-pair">
         <div class="chart-kpi">
@@ -2905,13 +2905,16 @@ function getDistRows(){
 function getLineRows(){
   const sF=getFCSelected('lcFC_ms'), sC=v('lcCL'), sM=v('lcMK');
   // Enforce DATA_START (Jan 7 2025) so chart always starts from that date.
-  return allRows.filter(r =>
-    inRange(r.shipment_report_date, false, false) && // bypassDataStart=false → enforces DATA_START
-    (r.fc_code||'')!=='TEST' &&
-    (sF.length===0||sF.includes(r.fc_code)) &&
-    (!sC||r.client_name===sC) &&
-    (!sM||r.marketplace_name===sM)
-  );
+  return allRows.filter(r => {
+    if(!r.shipment_report_date) return false;
+    const _d = String(r.shipment_report_date).split('T')[0];
+    if(_d < '2026-01-01') return false; // reject pre-2026 & garbage years
+    return inRange(r.shipment_report_date, false, false) &&
+      (r.fc_code||'')!=='TEST' &&
+      (sF.length===0||sF.includes(r.fc_code)) &&
+      (!sC||r.client_name===sC) &&
+      (!sM||r.marketplace_name===sM);
+  });
 }
 function v(id){ const e=document.getElementById(id); return e?e.value:''; }
 function vArr(id){
@@ -3473,6 +3476,7 @@ function renderLineChart(){
   rows.forEach(r=>{
     if(!r.shipment_report_date) return;
     let d=String(r.shipment_report_date).split('T')[0];
+    if(d < '2026-01-01') return; // skip pre-2026 and garbage years (e.g. '20206-...')
     if(d.startsWith('2026-12') && !_inDec2026) d=d.replace('2026-12','2025-12');
     byDate[d]=(byDate[d]||0)+1;
   });
@@ -4152,6 +4156,7 @@ function renderLineChart(){
   rows.forEach(r=>{
     if(!r.shipment_report_date) return;
     let d=String(r.shipment_report_date).split('T')[0];
+    if(d < '2026-01-01') return; // skip pre-2026 and garbage years (e.g. '20206-...')
     if(d.startsWith('2026-12') && !_inDec2026) d=d.replace('2026-12','2025-12');
     byDate[d]=(byDate[d]||0)+1;
   });
